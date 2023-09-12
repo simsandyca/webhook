@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
 import requests
+import re
 from urllib import parse
 from typing import Any
 from .scanner import Scanner
@@ -47,6 +48,11 @@ class GitLabAPI:
   get_files_in_commit_diff(project, commit)
     Returns the list of files in a commit diff
 
+  get_commit_comments(project, commit)
+    Returns a string with all comments from a commit
+
+  get_json_array(url)
+    Return an array of json objects using paging 
 
   """
 
@@ -56,34 +62,41 @@ class GitLabAPI:
     self.auth_headers = {'PRIVATE-TOKEN': self.api_key}
 
   def get_diff_json(self, project, commit):
-    pg = 1
-    tot_page = 1
-    json = []
-
-    while pg <= tot_page:
-      request_url = "%s/projects/%d/repository/commits/%s/diff?page=%d" % (
-          self.base_url, project['id'], commit['id'], pg)
-
-      r = requests.get(request_url, headers=self.auth_headers)
-      if r.status_code != 200:
-        logging.error(
-            "There was an error trying to obtain diff for commit, the server returned status %d", r.status_code)
-        return None
-
-      json += r.json()
-      tot_page = int(r.headers.get(GL_HEADER_TOTAL_PAGES) or 1)
-      pg += 1
-
-    return json
+    request_url = "%s/projects/%d/repository/commits/%s/diff" % (
+        self.base_url, project['id'], commit['id'])
+    return self.get_json_array(request_url)
 
   def get_commit_diff(self, project, commit):
-
     diff_list = self.get_diff_json(project, commit)
     if diff_list:
       diffs = ["--- %s\n+++ %s\n%s" %
                (d['old_path'], d['new_path'], d['diff']) for d in diff_list]
       return '\n'.join(diffs)
     return None
+
+  def get_commit_comments(self, project, commit):
+    request_url = "%s/projects/%d/repository/commits/%s/comments" % (
+        self.base_url, project['id'], commit['id'])
+    return self.get_json_array(request_url)
+
+  def get_json_array(self, url):
+    pg = 1
+    tot_page = 1
+    json = []
+
+    while pg <= tot_page:
+      request_url = "%s?page=%d" % (url, pg)
+      r = requests.get(request_url, headers=self.auth_headers)
+      if r.status_code != 200:
+        logging.error(
+            "There was an error trying to obtain url \"%s\", the server returned status %d", url, r.status_code)
+        return None
+    
+      json += r.json()
+      tot_page = int(r.headers.get(GL_HEADER_TOTAL_PAGES) or 1)
+      pg += 1
+
+    return json
 
   def get_files_in_commit_diff(self, project, commit):
     diff_obj = self.get_diff_json(project, commit)
@@ -201,11 +214,25 @@ class GitLabRequestHandler(BaseHTTPRequestHandler):
     self.end_headers()
     executor.submit(self.process_commits_diff(project, commits))
 
+  def already_scanned(self, project, commit):
+    scanned = False
+    comments = self.api.get_commit_comments(project, commit) 
+    if comments:
+      for comment in comments:
+        if re.search(".*SCANOSS VERIFIED.*", comment['note']):
+          scanned = True
+          break
+    return scanned
+
   def process_commits_diff(self, project, commits):
     logging.debug("Processing commits")
     # For each commit in push
     files = {}
     for commit in commits:
+
+      # Check if this commit already has a SCANOSS comment so we don't process it again
+      if self.already_scanned(project, commit):
+        continue
 
       # Get the contents of files in the commit
       for filename in self.api.get_files_in_commit_diff(project, commit):
@@ -221,7 +248,7 @@ class GitLabRequestHandler(BaseHTTPRequestHandler):
         # Add a comment to the commit
         comment = self.scanner.format_scan_results(scan_result)
         if comment:
-          note = {'note': comment['comment']}
+          note = {'note': "[comment]: <> (SCANOSS VERIFIED)\n\n%s" % (comment['comment'])}
           self.api.post_commit_comment(project, commit, note)
           # Update build status for commit
           self.api.update_build_status(project, commit, comment['validation'])
