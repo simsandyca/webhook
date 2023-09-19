@@ -2,6 +2,8 @@
 # Copyright (C) 2017-2020, SCANOSS Ltd. All rights reserved.
 # Use of this source code is governed by a BSD-style
 # license that can be found in the LICENSE file.
+#
+# Modified by Sandy Sim - Sept 2023
 
 from http.server import BaseHTTPRequestHandler
 
@@ -22,6 +24,10 @@ GL_HEADER_TOTAL_PAGES = 'x-total-pages'
 
 GL_PUSH_EVENT = 'Push Hook'
 GL_MERGE_REQUEST_EVENT = 'Merge Request Hook'
+
+# finding this marker in the commit comment will mean that the commit has already been scanned
+SCAN_MARKER = '[comment]: <> (SCANOSS)'
+STATUS_MARKER = '[comment]: <> ({"matched": "%s", "scan_result": "%s"})'
 
 executor = ThreadPoolExecutor(max_workers=10)
 
@@ -52,7 +58,7 @@ class GitLabAPI:
     Returns a string with all comments from a commit
 
   get_json_array(url)
-    Return an array of json objects using paging 
+    Return an array of json objects using Gitlab paging 
 
   """
 
@@ -72,6 +78,13 @@ class GitLabAPI:
       diffs = ["--- %s\n+++ %s\n%s" %
                (d['old_path'], d['new_path'], d['diff']) for d in diff_list]
       return '\n'.join(diffs)
+    return None
+
+  def get_files_in_commit_diff(self, project, commit):
+    diff_obj = self.get_diff_json(project, commit)
+    if diff_obj:
+      # We don't care about deleted files
+      return [d['new_path'] for d in diff_obj if not d['deleted_file']]
     return None
 
   def get_commit_comments(self, project, commit):
@@ -98,13 +111,6 @@ class GitLabAPI:
 
     return json
 
-  def get_files_in_commit_diff(self, project, commit):
-    diff_obj = self.get_diff_json(project, commit)
-    if diff_obj:
-      # We don't care about deleted files
-      return [d['new_path'] for d in diff_obj if not d['deleted_file']]
-    return None
-
   def post_commit_comment(self, project, commit, comment):
     """ Uses GitLab API to add a new commit comment
     """
@@ -116,8 +122,8 @@ class GitLabAPI:
       logging.error(
           "There was an error posting a comment for commit, the server returned status %d", r.status_code)
 
-  def get_assets_json_file(self, project, commit):
-    return self.get_file_contents(project, commit, "oss_assets.json")
+  def get_assets_json_file(self, project, commit, sbom_file):
+    return self.get_file_contents(project, commit, sbom_file)
 
   def get_file_contents(self, project, commit, filename):
     url = "%s/projects/%d/repository/files/%s" % (
@@ -162,6 +168,17 @@ class GitLabRequestHandler(BaseHTTPRequestHandler):
     self.api_key = self.config['gitlab']['api-key']
     self.base_url = self.config['gitlab']['api-base']
     self.api = GitLabAPI(config)
+    self.sbom_file = "SBOM.json"
+    try: 
+      # comment on the commit even if the scan passed
+      self.comment_always = config['scanoss']['comment_always']
+
+      # name of the sbom file
+      self.sbom_file = config['scanoss']['sbom_filename']
+   
+    except Exception: 
+      logging.error("There is an error in the scanoss section in the config file")
+      
     logging.debug("Starting GitLabRequestHandler with base_url: %s",
                   self.base_url)
     BaseHTTPRequestHandler.__init__(self, *args)
@@ -219,7 +236,7 @@ class GitLabRequestHandler(BaseHTTPRequestHandler):
     comments = self.api.get_commit_comments(project, commit) 
     if comments:
       for comment in comments:
-        if re.search(".*SCANOSS VERIFIED.*", comment['note']):
+        if re.search("^%s.*" % (SCAN_MARKER), comment['note']):
           scanned = True
           break
     return scanned
@@ -231,7 +248,7 @@ class GitLabRequestHandler(BaseHTTPRequestHandler):
     for commit in commits:
 
       # Check if this commit already has a SCANOSS comment so we don't process it again
-      if self.already_scanned(project, commit):
+      if not self.comment_always and self.already_scanned(project, commit):
         continue
 
       # Get the contents of files in the commit
@@ -242,13 +259,14 @@ class GitLabRequestHandler(BaseHTTPRequestHandler):
           files[filename] = contents
 
       # Send diff to scanner and obtain results
-      asset_json = self.api.get_assets_json_file(project, commit)
+      asset_json = self.api.get_assets_json_file(project, commit, self.sbom_file)
       scan_result = self.scanner.scan_files(files, asset_json)
-      if scan_result:
-        # Add a comment to the commit
+      if scan_result or self.comment_always:
         comment = self.scanner.format_scan_results(scan_result)
         if comment:
-          note = {'note': "[comment]: <> (SCANOSS VERIFIED)\n\n%s" % (comment['comment'])}
+          status = STATUS_MARKER % ('true' if scan_result.items() else 'false', 
+                                    json.dumps(scan_result))
+          note = {'note': "%s\n\n%s\n\n%s" % (SCAN_MARKER, comment['comment'], status)}
           self.api.post_commit_comment(project, commit, note)
           # Update build status for commit
           self.api.update_build_status(project, commit, comment['validation'])
