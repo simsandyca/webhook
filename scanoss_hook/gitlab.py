@@ -27,7 +27,7 @@ GL_MERGE_REQUEST_EVENT = 'Merge Request Hook'
 
 # finding this marker in the commit comment will mean that the commit has already been scanned
 SCAN_MARKER = '[comment]: <> (SCANOSS)'
-STATUS_MARKER = '[comment]: <> ({"matched": "%s", "scan_result": "%s"})'
+STATUS_MARKER = '[comment]: <> ({"validation": "%s", "scan_result": "%s"})'
 
 executor = ThreadPoolExecutor(max_workers=10)
 
@@ -117,7 +117,7 @@ class GitLabAPI:
     comments_url = "%s/projects/%d/repository/commits/%s/comments" % (
         self.base_url, project['id'], commit['id'])
     logging.debug("Post comment to URL: %s", comments_url)
-    r = requests.post(comments_url, params=comment, headers=self.auth_headers)
+    r = requests.post(comments_url, json=comment, headers=self.auth_headers)
     if r.status_code >= 400:
       logging.error(
           "There was an error posting a comment for commit, the server returned status %d", r.status_code)
@@ -141,7 +141,7 @@ class GitLabAPI:
     url = "%s/projects/%d/statuses/%s" % (self.base_url,
                                           project['id'], commit['id'])
     data = {"state": "success" if status else "failed"}
-    r = requests.post(url, params=data, headers=self.auth_headers)
+    r = requests.post(url, json=data, headers=self.auth_headers)
     if r.status_code >= 400:
       logging.error(
           "There was an error updating build status for commit %s", commit['id'])
@@ -170,8 +170,8 @@ class GitLabRequestHandler(BaseHTTPRequestHandler):
     self.api = GitLabAPI(config)
     self.sbom_file = "SBOM.json"
     try: 
-      # comment on the commit even if the scan passed
-      self.comment_always = config['scanoss']['comment_always']
+      # comment on the commit even if has already been scanned
+      self.comment_always = config['scanoss']['comment_always'] 
 
       # name of the sbom file
       self.sbom_file = config['scanoss']['sbom_filename']
@@ -181,6 +181,7 @@ class GitLabRequestHandler(BaseHTTPRequestHandler):
       
     logging.debug("Starting GitLabRequestHandler with base_url: %s",
                   self.base_url)
+
     BaseHTTPRequestHandler.__init__(self, *args)
 
   def do_POST(self):
@@ -261,10 +262,10 @@ class GitLabRequestHandler(BaseHTTPRequestHandler):
       # Send diff to scanner and obtain results
       asset_json = self.api.get_assets_json_file(project, commit, self.sbom_file)
       scan_result = self.scanner.scan_files(files, asset_json)
-      if scan_result or self.comment_always:
+      if scan_result:
         comment = self.scanner.format_scan_results(scan_result)
         if comment:
-          status = STATUS_MARKER % ('true' if scan_result.items() else 'false', 
+          status = STATUS_MARKER % ('true' if comment['validation'] else 'false', 
                                     json.dumps(scan_result))
           note = {'note': "%s\n\n%s\n\n%s" % (SCAN_MARKER, comment['comment'], status)}
           self.api.post_commit_comment(project, commit, note)
