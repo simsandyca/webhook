@@ -25,8 +25,12 @@ GL_HEADER_TOTAL_PAGES = 'x-total-pages'
 GL_PUSH_EVENT = 'Push Hook'
 GL_MERGE_REQUEST_EVENT = 'Merge Request Hook'
 
-# finding this marker in the commit comment will mean that the commit has already been scanned
+# This is a markdown comment that is used to check if this commit has already been scanned.
+#  Finding this marker in the commit comment will mean that the commit has already been scanned
 SCAN_MARKER = '[comment]: <> (SCANOSS)'
+
+# This markdown comment has a validation flag (true if the commit has open source) and the 
+#  raw scan result in json format
 STATUS_MARKER = '[comment]: <> ({"validation": "%s", "scan_result": "%s"})'
 
 executor = ThreadPoolExecutor(max_workers=10)
