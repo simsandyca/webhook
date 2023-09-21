@@ -2,6 +2,8 @@
 # Copyright (C) 2017-2020, SCANOSS Ltd. All rights reserved.
 # Use of this source code is governed by a BSD-style
 # license that can be found in the LICENSE file.
+#
+# Modified by Sandy Sim - Sept 2023
 
 from http.server import BaseHTTPRequestHandler
 
@@ -10,6 +12,7 @@ from concurrent.futures import ThreadPoolExecutor
 import json
 import logging
 import requests
+import re
 from urllib import parse
 from typing import Any
 from .scanner import Scanner
@@ -21,6 +24,14 @@ GL_HEADER_TOTAL_PAGES = 'x-total-pages'
 
 GL_PUSH_EVENT = 'Push Hook'
 GL_MERGE_REQUEST_EVENT = 'Merge Request Hook'
+
+# This is a markdown comment that is used to check if this commit has already been scanned.
+#  Finding this marker in the commit comment will mean that the commit has already been scanned
+SCAN_MARKER = '[comment]: <> (SCANOSS)'
+
+# This markdown comment has a validation flag (true if the commit has open source) and the 
+#  raw scan result in json format
+STATUS_MARKER = '[comment]: <> ({"validation": "%s", "scan_result": "%s"})'
 
 executor = ThreadPoolExecutor(max_workers=10)
 
@@ -47,6 +58,11 @@ class GitLabAPI:
   get_files_in_commit_diff(project, commit)
     Returns the list of files in a commit diff
 
+  get_commit_comments(project, commit)
+    Returns a string with all comments from a commit
+
+  get_json_array(url)
+    Return an array of json objects using Gitlab paging 
 
   """
 
@@ -56,28 +72,11 @@ class GitLabAPI:
     self.auth_headers = {'PRIVATE-TOKEN': self.api_key}
 
   def get_diff_json(self, project, commit):
-    pg = 1
-    tot_page = 1
-    json = []
-
-    while pg <= tot_page:
-      request_url = "%s/projects/%d/repository/commits/%s/diff?page=%d" % (
-          self.base_url, project['id'], commit['id'], pg)
-
-      r = requests.get(request_url, headers=self.auth_headers)
-      if r.status_code != 200:
-        logging.error(
-            "There was an error trying to obtain diff for commit, the server returned status %d", r.status_code)
-        return None
-
-      json += r.json()
-      tot_page = int(r.headers.get(GL_HEADER_TOTAL_PAGES) or 1)
-      pg += 1
-
-    return json
+    request_url = "%s/projects/%d/repository/commits/%s/diff" % (
+        self.base_url, project['id'], commit['id'])
+    return self.get_json_array(request_url)
 
   def get_commit_diff(self, project, commit):
-
     diff_list = self.get_diff_json(project, commit)
     if diff_list:
       diffs = ["--- %s\n+++ %s\n%s" %
@@ -92,19 +91,43 @@ class GitLabAPI:
       return [d['new_path'] for d in diff_obj if not d['deleted_file']]
     return None
 
+  def get_commit_comments(self, project, commit):
+    request_url = "%s/projects/%d/repository/commits/%s/comments" % (
+        self.base_url, project['id'], commit['id'])
+    return self.get_json_array(request_url)
+
+  def get_json_array(self, url):
+    pg = 1
+    tot_page = 1
+    json = []
+
+    while pg <= tot_page:
+      request_url = "%s?page=%d" % (url, pg)
+      r = requests.get(request_url, headers=self.auth_headers)
+      if r.status_code != 200:
+        logging.error(
+            "There was an error trying to obtain url \"%s\", the server returned status %d", url, r.status_code)
+        return None
+    
+      json += r.json()
+      tot_page = int(r.headers.get(GL_HEADER_TOTAL_PAGES) or 1)
+      pg += 1
+
+    return json
+
   def post_commit_comment(self, project, commit, comment):
     """ Uses GitLab API to add a new commit comment
     """
     comments_url = "%s/projects/%d/repository/commits/%s/comments" % (
         self.base_url, project['id'], commit['id'])
     logging.debug("Post comment to URL: %s", comments_url)
-    r = requests.post(comments_url, params=comment, headers=self.auth_headers)
+    r = requests.post(comments_url, json=comment, headers=self.auth_headers)
     if r.status_code >= 400:
       logging.error(
           "There was an error posting a comment for commit, the server returned status %d", r.status_code)
 
-  def get_assets_json_file(self, project, commit):
-    return self.get_file_contents(project, commit, "oss_assets.json")
+  def get_assets_json_file(self, project, commit, sbom_file):
+    return self.get_file_contents(project, commit, sbom_file)
 
   def get_file_contents(self, project, commit, filename):
     url = "%s/projects/%d/repository/files/%s" % (
@@ -122,7 +145,7 @@ class GitLabAPI:
     url = "%s/projects/%d/statuses/%s" % (self.base_url,
                                           project['id'], commit['id'])
     data = {"state": "success" if status else "failed"}
-    r = requests.post(url, params=data, headers=self.auth_headers)
+    r = requests.post(url, json=data, headers=self.auth_headers)
     if r.status_code >= 400:
       logging.error(
           "There was an error updating build status for commit %s", commit['id'])
@@ -149,8 +172,20 @@ class GitLabRequestHandler(BaseHTTPRequestHandler):
     self.api_key = self.config['gitlab']['api-key']
     self.base_url = self.config['gitlab']['api-base']
     self.api = GitLabAPI(config)
+    self.sbom_file = "SBOM.json"
+    try: 
+      # comment on the commit even if has already been scanned
+      self.comment_always = config['scanoss']['comment_always'] 
+
+      # name of the sbom file
+      self.sbom_file = config['scanoss']['sbom_filename']
+   
+    except Exception: 
+      logging.error("There is an error in the scanoss section in the config file")
+      
     logging.debug("Starting GitLabRequestHandler with base_url: %s",
                   self.base_url)
+
     BaseHTTPRequestHandler.__init__(self, *args)
 
   def do_POST(self):
@@ -201,11 +236,25 @@ class GitLabRequestHandler(BaseHTTPRequestHandler):
     self.end_headers()
     executor.submit(self.process_commits_diff(project, commits))
 
+  def already_scanned(self, project, commit):
+    scanned = False
+    comments = self.api.get_commit_comments(project, commit) 
+    if comments:
+      for comment in comments:
+        if re.search("^%s.*" % (SCAN_MARKER), comment['note']):
+          scanned = True
+          break
+    return scanned
+
   def process_commits_diff(self, project, commits):
     logging.debug("Processing commits")
     # For each commit in push
     files = {}
     for commit in commits:
+
+      # Check if this commit already has a SCANOSS comment so we don't process it again
+      if not self.comment_always and self.already_scanned(project, commit):
+        continue
 
       # Get the contents of files in the commit
       for filename in self.api.get_files_in_commit_diff(project, commit):
@@ -215,13 +264,14 @@ class GitLabRequestHandler(BaseHTTPRequestHandler):
           files[filename] = contents
 
       # Send diff to scanner and obtain results
-      asset_json = self.api.get_assets_json_file(project, commit)
+      asset_json = self.api.get_assets_json_file(project, commit, self.sbom_file)
       scan_result = self.scanner.scan_files(files, asset_json)
       if scan_result:
-        # Add a comment to the commit
         comment = self.scanner.format_scan_results(scan_result)
         if comment:
-          note = {'note': comment['comment']}
+          status = STATUS_MARKER % ('true' if comment['validation'] else 'false', 
+                                    json.dumps(scan_result))
+          note = {'note': "%s\n\n%s\n\n%s" % (SCAN_MARKER, comment['comment'], status)}
           self.api.post_commit_comment(project, commit, note)
           # Update build status for commit
           self.api.update_build_status(project, commit, comment['validation'])
