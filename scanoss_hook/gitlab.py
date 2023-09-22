@@ -174,8 +174,11 @@ class GitLabRequestHandler(BaseHTTPRequestHandler):
     self.api = GitLabAPI(config)
     self.sbom_file = "SBOM.json"
     try: 
-      # comment on the commit even if has already been scanned
+      # comment on the commit even if it has no open source matches
       self.comment_always = config['scanoss']['comment_always'] 
+
+      # Only comment on a commit once
+      self.comment_once = config['scanoss']['comment_once'] 
 
       # name of the sbom file
       self.sbom_file = config['scanoss']['sbom_filename']
@@ -253,7 +256,7 @@ class GitLabRequestHandler(BaseHTTPRequestHandler):
     for commit in commits:
 
       # Check if this commit already has a SCANOSS comment so we don't process it again
-      if not self.comment_always and self.already_scanned(project, commit):
+      if self.comment_once and self.already_scanned(project, commit):
         continue
 
       # Get the contents of files in the commit
@@ -269,10 +272,13 @@ class GitLabRequestHandler(BaseHTTPRequestHandler):
       if scan_result:
         comment = self.scanner.format_scan_results(scan_result)
         if comment:
-          status = STATUS_MARKER % ('true' if comment['validation'] else 'false', 
-                                    json.dumps(scan_result))
-          note = {'note': "%s\n\n%s\n\n%s" % (SCAN_MARKER, comment['comment'], status)}
-          self.api.post_commit_comment(project, commit, note)
+          if self.comment_always or not comment['validation']:
+            status = STATUS_MARKER % ('true' if comment['validation'] else 'false', 
+                                      json.dumps(scan_result))
+            note = {'note': "<!---\n%s\n\n%s\n\n%s\n--->" % 
+                       (SCAN_MARKER, comment['comment'], status)}
+            self.api.post_commit_comment(project, commit, note)
+
           # Update build status for commit
           self.api.update_build_status(project, commit, comment['validation'])
           logging.info("Updated comment and build status")
