@@ -275,7 +275,8 @@ class GitLabRequestHandler(BaseHTTPRequestHandler):
           if self.comment_always or not comment['validation']:
             status = STATUS_MARKER % ('true' if comment['validation'] else 'false', 
                                       json.dumps(scan_result))
-            note = {'note': "%s\n\n%s\n\n%s" % (SCAN_MARKER, comment['comment'], status)}
+            note = {'note': "<!---\n%s\n\n%s\n\n%s\n--->" % 
+                       (SCAN_MARKER, comment['comment'], status)}
             self.api.post_commit_comment(project, commit, note)
 
           # Update build status for commit
