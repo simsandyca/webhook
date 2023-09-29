@@ -237,6 +237,7 @@ class GitLabRequestHandler(BaseHTTPRequestHandler):
     logging.debug("Returning 200 OK")
     self.send_response(200, "OK")
     self.end_headers()
+    self.connection.close()
     executor.submit(self.process_commits_diff(project, commits))
 
   def already_scanned(self, project, commit):
