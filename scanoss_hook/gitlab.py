@@ -182,14 +182,42 @@ class GitLabRequestHandler(BaseHTTPRequestHandler):
 
       # name of the sbom file
       self.sbom_file = config['scanoss']['sbom_filename']
+ 
+      self.scanoss_url = self.config['scanoss']['url']
+      self.scanoss_token = self.config['scanoss']['token']
    
     except Exception: 
       logging.error("There is an error in the scanoss section in the config file")
+      
+    try: 
+      self.fix_file_url = config['webhook']['fix_file_url']
+      self.site_url = config['webhook']['site_url']
+    except Exception: 
+      logging.error("There is an error in the webhook section in the config file")
       
     logging.debug("Starting GitLabRequestHandler with base_url: %s",
                   self.base_url)
 
     BaseHTTPRequestHandler.__init__(self, *args)
+
+  def do_GET(self):
+    """ Handles relaying api gets with scanoss token 
+
+    """
+    path = parse.urlparse(self.path).path
+    if re.search("^/api/file_contents/.*", path):
+      url = self.scanoss_url + path
+      headers = {'X-Session': self.scanoss_token}
+      r = requests.get(url, headers=headers)
+      if r.status_code == 200:
+        self.send_response(200,"OK")
+        self.send_header("content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(bytes(r.content))
+      else: 
+        self.send_response(500,"Failed to get file from SCANOSS")
+        self.end_headers()
+      return
 
   def do_POST(self):
     """ Handles the webhook post event.
@@ -269,9 +297,14 @@ class GitLabRequestHandler(BaseHTTPRequestHandler):
       # Send diff to scanner and obtain results
       asset_json = self.api.get_assets_json_file(project, commit, self.sbom_file)
       scan_result = self.scanner.scan_files(files, asset_json)
+ 
       if scan_result:
         comment = self.scanner.format_scan_results(scan_result)
+        
         if comment:
+          if self.fix_file_url:
+            comment.update({'comment':
+              re.sub(re.escape(self.scanoss_url), self.site_url, comment['comment'])})
           if self.comment_always or not comment['validation']:
             status = STATUS_MARKER % ('true' if comment['validation'] else 'false', 
                                       json.dumps(scan_result))
