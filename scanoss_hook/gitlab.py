@@ -272,7 +272,7 @@ class GitLabRequestHandler(BaseHTTPRequestHandler):
     comments = self.api.get_commit_comments(project, commit) 
     if comments:
       for comment in comments:
-        if re.search("^%s.*" % (SCAN_MARKER), comment['note']):
+        if re.search("^%s.*" % (re.escape(SCAN_MARKER)), comment['note']):
           scanned = True
           break
     return scanned
