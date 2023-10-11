@@ -174,19 +174,50 @@ class GitLabRequestHandler(BaseHTTPRequestHandler):
     self.api = GitLabAPI(config)
     self.sbom_file = "SBOM.json"
     try: 
-      # comment on the commit even if has already been scanned
+      # comment on the commit even if it has no open source matches
       self.comment_always = config['scanoss']['comment_always'] 
+
+      # Only comment on a commit once
+      self.comment_once = config['scanoss']['comment_once'] 
 
       # name of the sbom file
       self.sbom_file = config['scanoss']['sbom_filename']
+ 
+      self.scanoss_url = self.config['scanoss']['url']
+      self.scanoss_token = self.config['scanoss']['token']
    
     except Exception: 
       logging.error("There is an error in the scanoss section in the config file")
+      
+    try: 
+      self.fix_file_url = config['webhook']['fix_file_url']
+      self.site_url = config['webhook']['site_url']
+    except Exception: 
+      logging.error("There is an error in the webhook section in the config file")
       
     logging.debug("Starting GitLabRequestHandler with base_url: %s",
                   self.base_url)
 
     BaseHTTPRequestHandler.__init__(self, *args)
+
+  def do_GET(self):
+    """ Handles relaying api gets with scanoss token 
+
+    """
+    path = parse.urlparse(self.path).path
+    if re.search("^/api/file_contents/.*", path):
+      url = self.scanoss_url + path
+      headers = {'X-Session': self.scanoss_token}
+      r = requests.get(url, headers=headers)
+      if r.status_code == 200:
+        self.send_response(200,"OK")
+        self.send_header("content-type", "text/plain")
+        self.end_headers()
+        self.wfile.write(bytes(r.content))
+      else: 
+        self.send_response(500,"Failed to get file from SCANOSS")
+        self.end_headers()
+      return
 
   def do_POST(self):
     """ Handles the webhook post event.
@@ -253,7 +284,7 @@ class GitLabRequestHandler(BaseHTTPRequestHandler):
     for commit in commits:
 
       # Check if this commit already has a SCANOSS comment so we don't process it again
-      if not self.comment_always and self.already_scanned(project, commit):
+      if self.comment_once and self.already_scanned(project, commit):
         continue
 
       # Get the contents of files in the commit
@@ -266,13 +297,21 @@ class GitLabRequestHandler(BaseHTTPRequestHandler):
       # Send diff to scanner and obtain results
       asset_json = self.api.get_assets_json_file(project, commit, self.sbom_file)
       scan_result = self.scanner.scan_files(files, asset_json)
+ 
       if scan_result:
         comment = self.scanner.format_scan_results(scan_result)
+        
         if comment:
-          status = STATUS_MARKER % ('true' if comment['validation'] else 'false', 
-                                    json.dumps(scan_result))
-          note = {'note': "%s\n\n%s\n\n%s" % (SCAN_MARKER, comment['comment'], status)}
-          self.api.post_commit_comment(project, commit, note)
+          if self.fix_file_url:
+            comment.update({'comment':
+              re.sub(re.escape(self.scanoss_url), self.site_url, comment['comment'])})
+          if self.comment_always or not comment['validation']:
+            status = STATUS_MARKER % ('true' if comment['validation'] else 'false', 
+                                      json.dumps(scan_result))
+            note = {'note': "%s\n\n%s\n\n<!---\n%s\n--->" % 
+                       (SCAN_MARKER, comment['comment'], status)}
+            self.api.post_commit_comment(project, commit, note)
+
           # Update build status for commit
           self.api.update_build_status(project, commit, comment['validation'])
           logging.info("Updated comment and build status")
