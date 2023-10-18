@@ -280,8 +280,8 @@ class GitLabRequestHandler(BaseHTTPRequestHandler):
   def process_commits_diff(self, project, commits):
     logging.debug("Processing commits")
     # For each commit in push
-    files = {}
     for commit in commits:
+      files = {}
 
       # Check if this commit already has a SCANOSS comment so we don't process it again
       if self.comment_once and self.already_scanned(project, commit):
