@@ -35,7 +35,6 @@ STATUS_MARKER = '[comment]: <> ({"validation": "%s", "scan_result": "%s"})'
 
 executor = ThreadPoolExecutor(max_workers=10)
 
-
 class GitLabAPI:
   """
   Several GitLab API functions
@@ -54,6 +53,9 @@ class GitLabAPI:
 
   get_commit_diff(project, commit)
     Retrieves the raw diff string for a commit.
+
+  get_commit_refs(project, commit)
+    Retrieves the list of refs in which the commit appears.
 
   get_files_in_commit_diff(project, commit)
     Returns the list of files in a commit diff
@@ -83,6 +85,11 @@ class GitLabAPI:
                (d['old_path'], d['new_path'], d['diff']) for d in diff_list]
       return '\n'.join(diffs)
     return None
+
+  def get_commit_refs(self, project, commit):
+    request_url = "%s/projects/%d/repository/commits/%s/refs" % (
+        self.base_url, project['id'], commit['id'])
+    return self.get_json_array(request_url)
 
   def get_files_in_commit_diff(self, project, commit):
     diff_obj = self.get_diff_json(project, commit)
@@ -277,11 +284,34 @@ class GitLabRequestHandler(BaseHTTPRequestHandler):
           break
     return scanned
 
+  def commit_in_default_branch(self, project, commit):
+    isIn = False
+    for ref in self.api.get_commit_refs(project, commit):
+      if ref['type'] == 'branch' and ref['name'] == project['default_branch']:
+        isIn = True
+        break;
+    return isIn
+
+  def commit_is_merge_from_default_branch(self, project, commit):
+    isMergeFromDefault = False
+    mergeTitle = "Merge branch '%s' into" % (project['default_branch'])
+    if re.search("^%s.*" % (re.escape(mergeTitle)), commit['title']):
+      isMergeFromDefault = True
+    return isMergeFromDefault 
+
   def process_commits_diff(self, project, commits):
     logging.debug("Processing commits")
     # For each commit in push
     for commit in commits:
       files = {}
+
+      # Check if this commit is already in the default_branch (e.g. main or master)
+      if self.commit_in_default_branch(project, commit):
+        continue
+
+      # Check if this commit is a merge from the default_branch 
+      if self.commit_is_merge_from_default_branch(project, commit):
+        continue
 
       # Check if this commit already has a SCANOSS comment so we don't process it again
       if self.comment_once and self.already_scanned(project, commit):
