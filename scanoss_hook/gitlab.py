@@ -286,14 +286,18 @@ class GitLabRequestHandler(BaseHTTPRequestHandler):
 
   def commit_in_default_branch(self, project, commit):
     isIn = False
-
     for ref in self.api.get_commit_refs(project, commit):
-      logging.debug("REF %s %s -> %s" % (ref['type'], ref['name'], project['default_branch']))
       if ref['type'] == 'branch' and ref['name'] == project['default_branch']:
         isIn = True
         break;
-
     return isIn
+
+  def commit_is_merge_from_default_branch(self, project, commit):
+    isMergeFromDefault = False
+    mergeTitle = "Merge branch '%s' into" % (project['default_branch'])
+    if re.search("^%s.*" % (re.escape(mergeTitle)), commit['title']):
+      isMergeFromDefault = True
+    return isMergeFromDefault 
 
   def process_commits_diff(self, project, commits):
     logging.debug("Processing commits")
@@ -303,6 +307,10 @@ class GitLabRequestHandler(BaseHTTPRequestHandler):
 
       # Check if this commit is already in the default_branch (e.g. main or master)
       if self.commit_in_default_branch(project, commit):
+        continue
+
+      # Check if this commit is a merge from the default_branch 
+      if self.commit_is_merge_from_default_branch(project, commit):
         continue
 
       # Check if this commit already has a SCANOSS comment so we don't process it again
