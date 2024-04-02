@@ -212,7 +212,7 @@ class GitLabRequestHandler(BaseHTTPRequestHandler):
 
     """
     path = parse.urlparse(self.path).path
-    if re.search("^/api/file_contents/.*", path):
+    if re.search("^/file_contents/.*", path):
       url = self.scanoss_url + path
       headers = {'X-Session': self.scanoss_token}
       r = requests.get(url, headers=headers)

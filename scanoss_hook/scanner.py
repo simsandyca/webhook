@@ -39,7 +39,7 @@ class Scanner:
 
   def __init__(self, config):
     self.url = config['scanoss']['url']
-    self.scan_url = "%s/api/scan/direct" % self.url
+    self.scan_url = "%s/scan/direct" % self.url
     self.token = config['scanoss']['token']
     self.badge_ok_url = "%s/static/badge-scanoss-ok.svg" % self.url
     self.badge_failed_url = "%s/static/badge-scanoss-failed.svg" % self.url
